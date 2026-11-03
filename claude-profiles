@@ -18,8 +18,6 @@ SETUP_ITEMS="settings.json CLAUDE.md keybindings.json skills commands agents hoo
   plugins/installed_plugins.json plugins/known_marketplaces.json plugins/config.json
   plugins/blocklist.json plugins/cache plugins/marketplaces plugins/repos"
 
-COLOR_HUE_DEGREES="orange:25 red:330 yellow:55 green:110 teal:160 blue:210 purple:265 pink:300"
-
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'claude-profiles: %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
@@ -43,10 +41,7 @@ require_profile() {
 }
 
 profile_names() {
-  [ -d "$STATE" ] || return 0
-  for d in "$STATE"/*/; do
-    if [ -d "$d" ]; then basename "$d"; fi
-  done
+  ls "$STATE" 2>/dev/null || true
 }
 
 
@@ -102,7 +97,7 @@ cmd_add() {
 
   say "Profile '$NAME' is ready. Drag \"$LAUNCHER\" to the Dock, open it and"
   say "sign in with \"Continue with email\" (README.md: Signing in to Desktop)."
-  shell_has_init || say "For the claude-$NAME command, add to ~/.zshrc or ~/.bash_profile: $(init_line)"
+  say "claude-$NAME works in terminals opened from now on."
 }
 
 # Run by the Dock launcher.
@@ -112,13 +107,12 @@ cmd_launch() {
   [ -f "$DIR/launch.log" ] && tail -n 200 "$DIR/launch.log" > "$DIR/launch.log.tmp" && mv "$DIR/launch.log.tmp" "$DIR/launch.log"
   exec >> "$DIR/launch.log" 2>&1
 
-  if [ -z "$(running_copy)" ]; then
+  if ! copy_running; then
     refresh_copy || log "could not build the copy; opening the one there is"
     block_self_update || log "could not block self-updates"
   fi
   if icon_outdated; then
-    local r; r=$(apply_profile_icon "$COPY" "$COPY")
-    [ "$r" = none ] || log "icon: $r"
+    set_profile_icon "$COPY" || log "could not set the icon"
   fi
   log "opening"
   # Full flags even to focus a running copy: if it is quitting, macOS starts it
@@ -156,23 +150,17 @@ cmd_check() {
   printf '%-12s %-9s %s\n' "(main)" - "${main:--}"
   [ -d "$CLAUDE_APP" ] || bad "Claude is not in /Applications"
   command -v claude >/dev/null || bad "no claude command. Install it: $INSTALL_CLAUDE_CODE"
-  shell_has_init || bad "no claude-<name> commands. Add to ~/.zshrc or ~/.bash_profile: $(init_line)"
 
   for name in $(profile_names); do
     load_profile "$name"
     email=$(account_email "$CONFIG/.claude.json")
     desktop=stopped
-    [ -z "$(running_copy)" ] || desktop=running
+    ! copy_running || desktop=running
     printf '%-12s %-9s %s\n' "$name" "$desktop" "${email:--}"
 
     launcher_is_current || bad "launcher missing or points elsewhere. Fix: claude-profiles add $name"
-    if [ -d "$COPY" ] && ! self_update_blocked; then
-      if [ -e "$DATA-3p" ]; then
-        bad "the copy can update itself and reopen on the wrong account. $DATA-3p holds settings this script never touches; set \"disableAutoUpdates\": true in its active configuration"
-      else
-        bad "the copy can update itself and reopen on the wrong account. Fix: click the launcher once"
-      fi
-    fi
+    [ ! -d "$COPY" ] || self_update_blocked ||
+      bad "the copy can update itself and reopen on the wrong account. Fix: click the launcher once; if $DATA-3p was there before, set \"disableAutoUpdates\": true in its active configuration"
     if [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then
       for item in $SETUP_ITEMS; do
         if [ -e "$HOME/.claude/$item" ] && [ ! -L "$CONFIG/$item" ]; then
@@ -194,10 +182,9 @@ cmd_check() {
 cmd_remove() {
   [ $# -eq 1 ] || { usage; exit 1; }
   require_profile "$1"
-  [ -z "$(running_copy)" ] || die "Claude '$NAME' is open. Quit it first"
+  ! copy_running || die "Claude '$NAME' is open. Quit it first"
   rm -rf "$LAUNCHER"
   rm -rf "$DIR" 2>/dev/null || die "could not delete $DIR. Drag it to the Trash in Finder, then run this again"
-  unblock_self_update
   say "Removed '$NAME'. Its sign-in and chats stay in $DATA and $CONFIG"
   say "(README.md says how to delete them). Unpin the launcher from the Dock."
 }
@@ -206,7 +193,7 @@ cmd_remove() {
 # ---- Claude Code settings ------------------------------------------------------
 
 seed_config() {
-  local mode=$1 item
+  local mode=$1 item servers
   mkdir -p "$CONFIG"
   echo "$mode" > "$DIR/settings"
   [ "$mode" = empty ] && return 0
@@ -222,23 +209,10 @@ seed_config() {
       if [ -f "$CONFIG/$item" ]; then sed -i '' "s#$HOME/.claude/#$CONFIG/#g" "$CONFIG/$item"; fi
     done
   fi
-  copy_mcp_servers
-}
-
-# The rest of ~/.claude.json is your main login.
-copy_mcp_servers() {
+  # MCP servers only: the rest of ~/.claude.json is your main login.
   [ -f "$HOME/.claude.json" ] && [ ! -e "$CONFIG/.claude.json" ] || return 0
-  local servers
   servers=$(plutil -extract mcpServers json -o - "$HOME/.claude.json" 2>/dev/null) || return 0
   (umask 077; printf '{ "mcpServers": %s }\n' "$servers" > "$CONFIG/.claude.json")
-}
-
-init_line() {
-  printf 'eval "$(%q init)"' "$SELF"
-}
-
-shell_has_init() {
-  grep -qs 'claude-profiles init' "$HOME/.zshrc" "$HOME/.bash_profile"
 }
 
 
@@ -255,10 +229,7 @@ make_launcher() {
     die "could not build the launcher: $out"
   # Its own bundle id, so macOS keeps each profile's launcher apart.
   /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string local.claude-profiles.$NAME" "$LAUNCHER/Contents/Info.plist"
-  if [ "$(apply_profile_icon "$LAUNCHER" "$CLAUDE_APP")" != ok ]; then
-    sips -s format png "$(ls "$CLAUDE_APP/Contents/Resources/"*.icns | head -1)" --out "$DIR/.claude.png" >/dev/null
-    set_icon "$DIR/.claude.png" "$LAUNCHER" >/dev/null
-  fi
+  set_profile_icon "$LAUNCHER"
 }
 
 launcher_is_current() {
@@ -266,21 +237,11 @@ launcher_is_current() {
 }
 
 hue_of() {
-  local pair
-  for pair in $COLOR_HUE_DEGREES; do [ "${pair%%:*}" = "$1" ] && { echo "${pair#*:}"; return; }; done
-  die "unknown colour '$1'. Choose one of: $(for p in $COLOR_HUE_DEGREES; do printf '%s ' "${p%%:*}"; done)"
-}
-
-# Prints ok, none (no icon chosen) or what went wrong.
-apply_profile_icon() {
-  local app=$1 source_app=$2 png="$DIR/icon.png"
-  if [ -f "$DIR/color" ]; then
-    png="$DIR/.tinted.png"
-    local r; r=$(tint_icon "$source_app" "$(cat "$DIR/color")" "$png")
-    [ "$r" = ok ] || { echo "$r"; return; }
-  fi
-  [ -f "$png" ] || { echo none; return; }
-  set_icon "$png" "$app"
+  case "$1" in
+    orange) echo 25 ;;  red)  echo 330 ;;  yellow) echo 55 ;;  green) echo 110 ;;
+    teal)   echo 160 ;; blue) echo 210 ;;  purple) echo 265 ;; pink)  echo 300 ;;
+    *) die "unknown colour '$1'. Choose one of: orange red yellow green teal blue purple pink" ;;
+  esac
 }
 
 icon_outdated() {
@@ -288,35 +249,28 @@ icon_outdated() {
   [ ! -e "$custom_icon" ] || [ "$DIR/color" -nt "$custom_icon" ] || [ "$DIR/icon.png" -nt "$custom_icon" ]
 }
 
-tint_icon() {
-  local source_app=$1 hue=$2 png=$3 icns
-  icns=$(ls "$source_app/Contents/Resources/"*.icns 2>/dev/null | head -1)
-  [ -n "$icns" ] || { echo "no icon in $source_app"; return 0; }
-  osascript -l JavaScript - "$icns" "$hue" "$png" <<'JS'
+# Puts the profile's icon on an app: the --icon image, or Claude's icon tinted
+# by --color, or Claude's icon as it is.
+set_profile_icon() {
+  local app=$1 image hue=0
+  image=$(ls "$CLAUDE_APP/Contents/Resources/"*.icns | head -1)
+  [ ! -f "$DIR/icon.png" ] || image="$DIR/icon.png"
+  [ ! -f "$DIR/color" ] || hue=$(cat "$DIR/color")
+  osascript -l JavaScript - "$image" "$hue" "$app" <<'JS' >/dev/null
 ObjC.import('AppKit'); ObjC.import('CoreImage');
 function run(argv) {
-  var input = $.CIImage.imageWithData($.NSData.dataWithContentsOfFile(argv[0]));
-  var filter = $.CIFilter.filterWithName('CIHueAdjust');
-  filter.setValueForKey(input, 'inputImage');
-  filter.setValueForKey($.NSNumber.numberWithDouble(parseFloat(argv[1]) * Math.PI / 180), 'inputAngle');
-  var rep = $.NSCIImageRep.imageRepWithCIImage(filter.valueForKey('outputImage'));
-  var image = $.NSImage.alloc.initWithSize(rep.size);
-  image.addRepresentation(rep);
-  var png = $.NSBitmapImageRep.imageRepWithData(image.TIFFRepresentation)
-    .representationUsingTypeProperties($.NSBitmapImageFileTypePNG, $());
-  return png.writeToFileAtomically(argv[2], true) ? 'ok' : 'cannot write ' + argv[2];
-}
-JS
-}
-
-set_icon() {
-  local image=$1 app=$2
-  osascript -l JavaScript - "$image" "$app" <<'JS'
-ObjC.import('AppKit');
-function run(argv) {
   var image = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
-  if (image.isNil()) return 'cannot read ' + argv[0];
-  return $.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[1], 0) ? 'ok' : 'cannot set icon';
+  if (image.isNil()) throw Error('cannot read ' + argv[0]);
+  if (argv[1] != '0') {
+    var filter = $.CIFilter.filterWithName('CIHueAdjust');
+    filter.setValueForKey($.CIImage.imageWithData($.NSData.dataWithContentsOfFile(argv[0])), 'inputImage');
+    filter.setValueForKey($.NSNumber.numberWithDouble(argv[1] * Math.PI / 180), 'inputAngle');
+    var rep = $.NSCIImageRep.imageRepWithCIImage(filter.valueForKey('outputImage'));
+    image = $.NSImage.alloc.initWithSize(rep.size);
+    image.addRepresentation(rep);
+  }
+  if (!$.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[2], 0))
+    throw Error('cannot set the icon of ' + argv[2]);
 }
 JS
 }
@@ -332,9 +286,7 @@ refresh_copy() {
   [ -n "$want" ] || return 1
   [ "$have" = "$want" ] && return 0
   log "building the copy from Claude $want (had: ${have:-none})"
-  rm -rf "$COPY.new" || return 1
-  cp -Rc "$CLAUDE_APP" "$COPY.new" 2>/dev/null ||
-    { rm -rf "$COPY.new" && cp -R "$CLAUDE_APP" "$COPY.new"; } || return 1
+  rm -rf "$COPY.new" && cp -Rc "$CLAUDE_APP" "$COPY.new" || return 1
   rm -rf "$COPY" && mv "$COPY.new" "$COPY"
 }
 
@@ -343,36 +295,19 @@ app_version() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null
 }
 
-running_copy() {
-  local main_process="$COPY/Contents/MacOS/"
-  ps -axww -o pid=,command= | grep -F "$main_process" | grep -v grep || true
+copy_running() {
+  pgrep -qf "$COPY/Contents/MacOS/"
 }
 
 # A self-update relaunches the copy without --user-data-dir, on the wrong account.
 # The -3p folder may hold your own provider setup, so it is written only when absent.
 block_self_update() {
-  local root="$DATA-3p" id
-  [ -e "$root" ] && return 0
+  local root="$DATA-3p/configLibrary" id
+  [ -e "$DATA-3p" ] && return 0
   id=$(uuidgen | tr 'A-Z' 'a-z')
-  mkdir -p "$root/configLibrary" &&
-    printf '{ "disableAutoUpdates": true }\n' > "$root/configLibrary/$id.json" &&
-    policy_meta "$id" > "$root/configLibrary/_meta.json" &&
-    echo "$id" > "$root/written-by-claude-profiles"
-}
-
-policy_meta() {
-  printf '{ "appliedId": "%s", "entries": [ { "id": "%s", "name": "Default" } ] }\n' "$1" "$1"
-}
-
-unblock_self_update() {
-  local root="$DATA-3p" id
-  id=$(cat "$root/written-by-claude-profiles" 2>/dev/null) || return 0
-  # Changed since we wrote it: it may hold your own settings now, so it stays.
-  if policy_meta "$id" | cmp -s - "$root/configLibrary/_meta.json"; then
-    rm -f "$root/configLibrary/$id.json" "$root/configLibrary/_meta.json"
-  fi
-  rm -f "$root/written-by-claude-profiles"
-  rmdir "$root/configLibrary" "$root" 2>/dev/null || true
+  mkdir -p "$root" &&
+    printf '{ "disableAutoUpdates": true }\n' > "$root/$id.json" &&
+    printf '{ "appliedId": "%s", "entries": [ { "id": "%s", "name": "Default" } ] }\n' "$id" "$id" > "$root/_meta.json"
 }
 
 self_update_blocked() {
@@ -386,12 +321,7 @@ account_email() {
 
 
 case "${1:-}" in
-  add)    shift; cmd_add "$@" ;;
-  check)  shift; cmd_check ;;
-  remove) shift; cmd_remove "$@" ;;
-  init)   shift; cmd_init ;;
-  launch) shift; cmd_launch "$@" ;;
-  code)   shift; cmd_code "$@" ;;
+  add|check|remove|init|launch|code) cmd=$1; shift; "cmd_$cmd" "$@" ;;
   ""|-h|--help|help) usage ;;
   *) usage; exit 1 ;;
 esac

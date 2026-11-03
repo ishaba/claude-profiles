@@ -69,9 +69,9 @@ claude-<name> [claude arguments]
 - `check` lists your profiles with their accounts, and under each one any
   problem with how to fix it.
 - `remove` deletes the profile but keeps its sign-in and chats on disk. To
-  delete those too, remove `~/Library/Application Support/Claude-<name>` and
-  `~/.claude-<name>`, and in Keychain Access delete the profile's
-  "Claude Code-credentials" entry.
+  delete those too, remove `~/.claude-<name>` and, in
+  `~/Library/Application Support`, `Claude-<name>` and `Claude-<name>-3p`.
+  Then in Keychain Access delete the profile's "Claude Code-credentials" entry.
 - `init` prints the shell functions; your shell file runs it on startup.
 
 ## How it works
