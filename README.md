@@ -104,9 +104,10 @@ is signed in to the same account as your main Claude.
 
 ## Limitations
 
-- macOS only, and unofficial: `--user-data-dir` is an Electron flag and
-  `CLAUDE_CONFIG_DIR` is an undocumented Claude Code variable. If Anthropic
-  changes either, the script will need an update.
+- macOS only, and partly unofficial: Claude Desktop doesn't document
+  `--user-data-dir`, an Electron flag. Claude Code documents
+  `CLAUDE_CONFIG_DIR`. If Anthropic changes either, the script will need an
+  update.
 - Keep the launcher in the Dock, not the running app's icon. That icon starts
   the copy without the profile's data folder, so it opens your main account.
   If that happens, quit the app and reopen it from the launcher.
