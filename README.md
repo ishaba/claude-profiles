@@ -1,11 +1,32 @@
-# claude-profiles
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ishaba/claude-profiles/assets/logo.svg" width="72" alt="">
+</p>
 
-Use multiple Claude accounts side by side on one Mac. Each profile gets its own
-sign-in and chats, its own Claude Desktop icon in the Dock, and its own Claude
-Code command. Claude Code settings can be shared with your main account or kept
-separate.
+<h1 align="center">claude-profiles</h1>
 
-It's a single Bash script with no dependencies. Read it before installing.
+<p align="center">
+  Several Claude accounts side by side on one Mac.<br>
+  Each with its own sign-in, chats, Dock icon, and <code>claude-&lt;name&gt;</code> command.
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#signing-in-to-desktop">Signing in</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#limitations">Limitations</a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/ishaba/claude-profiles/assets/banner-dark.svg">
+    <img src="https://raw.githubusercontent.com/ishaba/claude-profiles/assets/banner-light.svg" alt="A terminal runs claude-profiles add work, and the Dock shows three Claude profiles: main, work, and personal">
+  </picture>
+</p>
+
+It's a single Bash script with no dependencies, a few hundred lines. Read it
+before installing. Claude Code settings can be shared with your main account or
+kept separate.
 
 ## Install
 
@@ -13,63 +34,88 @@ You need macOS, Claude Desktop in `/Applications`, and Claude Code
 (`curl -fsSL https://claude.ai/install.sh | bash`).
 
 ```bash
-git clone https://github.com/ishaba/claude-profiles ~/.local/share/claude-profiles
+git clone --depth 1 https://github.com/ishaba/claude-profiles ~/.local/share/claude-profiles
 ~/.local/share/claude-profiles/claude-profiles add work
 ```
 
 `add` asks how to handle your Claude Code settings. Then:
 
 1. Drag `~/Applications/Claude work.app` to the Dock and open it.
-2. Sign in to your second account (see "Signing in to Desktop").
+2. Sign in to your second account.
 3. In the terminal, run `claude-work` and sign in there too (`/login`).
-4. Run `claude-profiles check`.
+4. Run `claude-profiles check`:
+
+```text
+PROFILE      DESKTOP   CLAUDE CODE ACCOUNT
+(main)       -         you@personal.com
+work         running   you@company.com
+
+All good.
+```
+
+> [!IMPORTANT]
+> In Claude Desktop, sign in with **Continue with email**. A browser sign-in
+> opens your main Claude instead. See [Signing in to Desktop](#signing-in-to-desktop).
 
 `add` puts the `claude-profiles` and `claude-work` commands in `~/.local/bin`,
-where Claude Code installs itself. If you installed Claude Code another way and
-that folder isn't in your `PATH`, `check` tells you what to add.
-
-Your main Claude (`/Applications/Claude.app` and `claude`) is left untouched.
+next to `claude`. Your main Claude (`/Applications/Claude.app` and `claude`) is
+left untouched.
 
 ## Signing in to Desktop
 
-Choose "Continue with email" and type in the code from the email. Browser and
+Choose **Continue with email** and type in the code from the email. Browser and
 Google sign-in, and the link in the email, all return to the app through a
 `claude://` link. macOS sends that link to your main Claude, so the profile
 never gets signed in.
 
-If you'd rather sign in through the browser, quit your main Claude first (⌘Q),
-sign in to the profile, then reopen it. The profile stays signed in, and both
-run side by side from then on.
+> [!TIP]
+> Prefer the browser? Quit your main Claude first (⌘Q), sign in to the profile,
+> then reopen it. The profile stays signed in, and both run side by side from
+> then on.
 
 Signing in from the terminal (`claude-work`, then `/login`) works either way.
 
 ## Commands
 
-```
+```text
 claude-profiles add <name> [--color <color>] [--icon <image>] [--settings shared|copy|empty]
 claude-profiles check
 claude-profiles remove <name>
 claude-<name> [claude arguments]
 ```
 
-- `add` creates a profile. Running it again repairs the launcher without
-  touching the profile's sign-in or chats.
-- `--color` tints the icon orange, red, yellow, green, teal, blue, purple, or
-  pink. `--icon` uses your own image (png, jpg, icns).
-- `--settings` controls what the profile takes from your main Claude:
-  CLAUDE.md, settings.json, skills, commands, agents, hooks, and plugins.
-  - `shared`: symlinked, so a change in one shows up in both.
-  - `copy`: copied once, then independent.
-  - `empty`: start fresh.
-
-  With `shared` and `copy`, MCP servers are copied too, including any keys in
-  their settings. Sign-in, chats, history, and memory are never carried over.
-- `check` lists your profiles with their accounts, and under each one any
+- `add <name>` creates a profile. Run it again to repair the launcher and
+  commands; sign-in and chats stay as they are.
+- `check` lists your profiles and their accounts, and under each one any
   problem with how to fix it.
-- `remove` deletes the profile but keeps its sign-in and chats on disk. To
-  delete those too, remove `~/.claude-<name>` and, in
-  `~/Library/Application Support`, `Claude-<name>` and `Claude-<name>-3p`.
-  Then in Keychain Access delete the profile's "Claude Code-credentials" entry.
+- `remove <name>` deletes the profile. Its sign-in and chats stay on disk.
+- `claude-<name>` runs Claude Code in that profile.
+
+Options for `add`:
+
+- `--color <color>` tints the icon: orange, red, yellow, green, teal, blue,
+  purple, or pink.
+- `--icon <image>` uses your own image: png, jpg, or icns.
+- `--settings shared` symlinks your Claude Code setup, so a change in one
+  shows up in both.
+- `--settings copy` copies it once, then the two are independent.
+- `--settings empty` starts fresh.
+
+The setup is CLAUDE.md, settings.json, skills, commands, agents, hooks, and
+plugins. With `shared` and `copy`, MCP servers are copied too, including any
+keys in their settings. Sign-in, chats, history, and memory are never carried
+over.
+
+<details>
+<summary>Deleting a removed profile's data for good</summary>
+
+<br>
+
+Delete `~/.claude-<name>`, and in `~/Library/Application Support` delete
+`Claude-<name>` and `Claude-<name>-3p`. Then open Keychain Access and delete
+the profile's "Claude Code-credentials" entry.
+
+</details>
 
 ## How it works
 
@@ -104,17 +150,20 @@ is signed in to the same account as your main Claude.
 
 ## Limitations
 
-- macOS only, and partly unofficial: Claude Desktop doesn't document
+- **macOS only, and partly unofficial.** Claude Desktop doesn't document
   `--user-data-dir`, an Electron flag. Claude Code documents
   `CLAUDE_CONFIG_DIR`. If Anthropic changes either, the script will need an
   update.
-- Keep the launcher in the Dock, not the running app's icon. That icon starts
-  the copy without the profile's data folder, so it opens your main account.
-  If that happens, quit the app and reopen it from the launcher.
-- One subscription covers one seat, so two profiles need two different
+- **Keep the launcher in the Dock**, not the running app's icon. That icon
+  starts the copy without the profile's data folder, so it opens your main
+  account. If that happens, quit the app and reopen it from the launcher.
+- **One subscription covers one seat**, so two profiles need two different
   accounts.
 
-## Migrating from claude-multiprofile
+<details>
+<summary><b>Migrating from claude-multiprofile</b></summary>
+
+<br>
 
 Your existing profile folders are reused, so you won't need to sign in again.
 
@@ -136,8 +185,15 @@ Your existing profile folders are reused, so you won't need to sign in again.
    `npm uninstall -g claude-multiprofile`, and move
    `~/Library/Application Support/claude-multiprofile` to the Trash.
 
+</details>
+
 ## Credits
 
 Ideas from [claude-multiprofile](https://github.com/jmdarre-v/claude-multiprofile)
 (MIT): copying the app for a separate icon, blocking auto-updates through `-3p`,
 copying MCP servers, and the email sign-in workaround.
+
+## License
+
+[MIT](LICENSE). Not affiliated with Anthropic. Claude is a trademark of
+Anthropic.
