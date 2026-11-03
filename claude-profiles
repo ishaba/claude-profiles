@@ -8,9 +8,12 @@
 
 set -eu
 
-SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+src=${BASH_SOURCE[0]}
+[ -L "$src" ] && src=$(readlink "$src")
+SELF="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
 CLAUDE_APP="/Applications/Claude.app"
 STATE="$HOME/Library/Application Support/claude-profiles"
+BIN="$HOME/.local/bin"
 INSTALL_CLAUDE_CODE="curl -fsSL https://claude.ai/install.sh | bash"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
@@ -54,7 +57,6 @@ claude-profiles: several Claude accounts side by side on one Mac. See README.md.
   claude-profiles add <name> [--color <c>] [--icon <image>] [--settings shared|copy|empty]
   claude-profiles check
   claude-profiles remove <name>
-  claude-profiles init         the claude-<name> commands, for eval in your shell file
   claude-<name> [args]         Claude Code in that profile
 EOF
 }
@@ -72,6 +74,8 @@ cmd_add() {
     esac
   done
   [ -d "$CLAUDE_APP" ] || die "Claude is not installed in /Applications"
+  link_command claude-profiles
+  link_command "claude-$NAME"
   mkdir -p "$DIR"
 
   if [ -n "$color" ]; then echo "$color" > "$DIR/color"; rm -f "$DIR/icon.png"; fi
@@ -97,7 +101,7 @@ cmd_add() {
 
   say "Profile '$NAME' is ready. Drag \"$LAUNCHER\" to the Dock, open it and"
   say "sign in with \"Continue with email\" (README.md: Signing in to Desktop)."
-  say "claude-$NAME works in terminals opened from now on."
+  say "In the terminal: claude-$NAME."
 }
 
 # Run by the Dock launcher.
@@ -133,14 +137,6 @@ cmd_code() {
   CLAUDE_CONFIG_DIR="$CONFIG" exec claude "$@"
 }
 
-cmd_init() {
-  local name
-  printf 'claude-profiles() { %q "$@"; }\n' "$SELF"
-  for name in $(profile_names); do
-    printf 'claude-%s() { %q code %s "$@"; }\n' "$name" "$SELF" "$name"
-  done
-}
-
 cmd_check() {
   local problems=0 name main email desktop item
   bad() { say "  ✗ $*"; problems=$((problems + 1)); }
@@ -150,6 +146,7 @@ cmd_check() {
   printf '%-12s %-9s %s\n' "(main)" - "${main:--}"
   [ -d "$CLAUDE_APP" ] || bad "Claude is not in /Applications"
   command -v claude >/dev/null || bad "no claude command. Install it: $INSTALL_CLAUDE_CODE"
+  case ":$PATH:" in *":$BIN:"*) ;; *) bad "$BIN is not in your PATH. Add to your shell file: export PATH=\"\$HOME/.local/bin:\$PATH\"" ;; esac
 
   for name in $(profile_names); do
     load_profile "$name"
@@ -159,6 +156,7 @@ cmd_check() {
     printf '%-12s %-9s %s\n' "$name" "$desktop" "${email:--}"
 
     launcher_is_current || bad "launcher missing or points elsewhere. Fix: claude-profiles add $name"
+    [ "$(readlink "$BIN/claude-$name")" = "$SELF" ] || bad "no claude-$name command. Fix: claude-profiles add $name"
     [ ! -d "$COPY" ] || self_update_blocked ||
       bad "the copy can update itself and reopen on the wrong account. Fix: click the launcher once; if $DATA-3p was there before, set \"disableAutoUpdates\": true in its active configuration"
     if [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then
@@ -184,13 +182,27 @@ cmd_remove() {
   require_profile "$1"
   ! copy_running || die "Claude '$NAME' is open. Quit it first"
   rm -rf "$LAUNCHER"
+  ! our_link "$BIN/claude-$NAME" || rm "$BIN/claude-$NAME"
   rm -rf "$DIR" 2>/dev/null || die "could not delete $DIR. Drag it to the Trash in Finder, then run this again"
   say "Removed '$NAME'. Its sign-in and chats stay in $DATA and $CONFIG"
   say "(README.md says how to delete them). Unpin the launcher from the Dock."
 }
 
 
-# ---- Claude Code settings ------------------------------------------------------
+# ---- Claude Code: commands and settings ----------------------------------------
+
+# ~/.local/bin is where Claude Code installs itself, so it is already in PATH.
+# The script runs as claude-<name> through a symlink to itself.
+link_command() {
+  local link="$BIN/$1"
+  ! our_link "$link" || rm "$link"
+  [ ! -e "$link" ] && [ ! -L "$link" ] || die "$link already exists. Move it aside, then run this again"
+  mkdir -p "$BIN" && ln -s "$SELF" "$link"
+}
+
+our_link() {
+  [ -L "$1" ] && [ "$(basename "$(readlink "$1")")" = claude-profiles ]
+}
 
 seed_config() {
   local mode=$1 item servers
@@ -320,8 +332,14 @@ account_email() {
 }
 
 
+me=$(basename "$0")
+case "$me" in
+  claude-profiles) ;;
+  claude-*) cmd_code "${me#claude-}" "$@" ;;
+esac
+
 case "${1:-}" in
-  add|check|remove|init|launch|code) cmd=$1; shift; "cmd_$cmd" "$@" ;;
+  add|check|remove|launch|code) cmd=$1; shift; "cmd_$cmd" "$@" ;;
   ""|-h|--help|help) usage ;;
   *) usage; exit 1 ;;
 esac

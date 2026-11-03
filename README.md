@@ -14,20 +14,19 @@ You need macOS, Claude Desktop in `/Applications`, and Claude Code
 
 ```bash
 git clone https://github.com/ishaba/claude-profiles ~/.local/share/claude-profiles
-echo 'eval "$(~/.local/share/claude-profiles/claude-profiles init)"' >> ~/.zshrc
+~/.local/share/claude-profiles/claude-profiles add work
 ```
 
-The second line gives you the `claude-profiles` command and a `claude-<name>`
-command for each profile. On bash, add it to `~/.bash_profile` instead.
+`add` asks how to handle your Claude Code settings. Then:
 
-Open a new terminal, then:
+1. Drag `~/Applications/Claude work.app` to the Dock and open it.
+2. Sign in to your second account (see "Signing in to Desktop").
+3. In the terminal, run `claude-work` and sign in there too (`/login`).
+4. Run `claude-profiles check`.
 
-1. Run `claude-profiles add work`. It asks how to handle your Claude Code
-   settings.
-2. Drag `~/Applications/Claude work.app` to the Dock and open it.
-3. Sign in to your second account (see "Signing in to Desktop").
-4. In a new terminal, run `claude-work` and sign in there too (`/login`).
-5. Run `claude-profiles check`.
+`add` puts the `claude-profiles` and `claude-work` commands in `~/.local/bin`,
+where Claude Code installs itself. If you installed Claude Code another way and
+that folder isn't in your `PATH`, `check` tells you what to add.
 
 Your main Claude (`/Applications/Claude.app` and `claude`) is left untouched.
 
@@ -50,7 +49,6 @@ Signing in from the terminal (`claude-work`, then `/login`) works either way.
 claude-profiles add <name> [--color <color>] [--icon <image>] [--settings shared|copy|empty]
 claude-profiles check
 claude-profiles remove <name>
-claude-profiles init
 claude-<name> [claude arguments]
 ```
 
@@ -72,8 +70,6 @@ claude-<name> [claude arguments]
   delete those too, remove `~/.claude-<name>` and, in
   `~/Library/Application Support`, `Claude-<name>` and `Claude-<name>-3p`.
   Then in Keychain Access delete the profile's "Claude Code-credentials" entry.
-- `init` prints the shell functions; your shell file runs it on startup.
-
 ## How it works
 
 A profile is just a name. Every path is derived from it, so there's no registry
@@ -85,7 +81,7 @@ to keep in sync. For `work`:
 | App copy, icon, and log | `~/Library/Application Support/claude-profiles/work/` |
 | Desktop sign-in, chats, and settings | `~/Library/Application Support/Claude-work` |
 | Claude Code sign-in, settings, and memory | `~/.claude-work` |
-| Command | `claude-work`, a shell function from `claude-profiles init` |
+| Command | `~/.local/bin/claude-work`, a symlink to the script |
 
 Desktop keeps its data in the folder passed with `--user-data-dir`. Claude Code
 uses `CLAUDE_CONFIG_DIR` for its files and to keep its Keychain credentials
@@ -131,9 +127,9 @@ Your existing profile folders are reused, so you won't need to sign in again.
    ```
 
 3. Remove the `claude-multiprofile` block from `~/.zshrc`, or its alias will
-   override the new command. Install claude-profiles as above.
-4. Run `claude-profiles add work`. It replaces the old launcher and leaves
-   `~/.claude-work` as is.
+   override the new command.
+4. Install claude-profiles as above (`add work`). It replaces the old launcher
+   and leaves `~/.claude-work` as is.
 5. Once everything works, remove the old Dock icons, run
    `npm uninstall -g claude-multiprofile`, and move
    `~/Library/Application Support/claude-multiprofile` to the Trash.
