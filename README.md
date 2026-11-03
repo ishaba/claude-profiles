@@ -14,15 +14,20 @@ You need macOS, Claude Desktop in `/Applications`, and Claude Code
 
 ```bash
 git clone https://github.com/ishaba/claude-profiles ~/.local/share/claude-profiles
-~/.local/share/claude-profiles/claude-profiles add work
+echo 'eval "$(~/.local/share/claude-profiles/claude-profiles init)"' >> ~/.zshrc
 ```
 
-`add` asks how to handle your Claude Code settings. Then:
+The second line gives you the `claude-profiles` command and a `claude-<name>`
+command for each profile. On bash, add it to `~/.bash_profile` instead.
 
-1. Drag `~/Applications/Claude work.app` to the Dock and open it.
-2. Sign in to your second account (see "Signing in to Desktop").
-3. In a new terminal, run `claude-work` and sign in there too (`/login`).
-4. Run `claude-profiles check`.
+Open a new terminal, then:
+
+1. Run `claude-profiles add work`. It asks how to handle your Claude Code
+   settings.
+2. Drag `~/Applications/Claude work.app` to the Dock and open it.
+3. Sign in to your second account (see "Signing in to Desktop").
+4. In a new terminal, run `claude-work` and sign in there too (`/login`).
+5. Run `claude-profiles check`.
 
 Your main Claude (`/Applications/Claude.app` and `claude`) is left untouched.
 
@@ -43,14 +48,14 @@ Signing in from the terminal (`claude-work`, then `/login`) works either way.
 
 ```
 claude-profiles add <name> [--color <color>] [--icon <image>] [--settings shared|copy|empty]
-claude-profiles list
 claude-profiles check
 claude-profiles remove <name>
+claude-profiles init
 claude-<name> [claude arguments]
 ```
 
-- `add` creates a profile. Running it again repairs the launcher and shell
-  commands without touching the profile's sign-in or chats.
+- `add` creates a profile. Running it again repairs the launcher without
+  touching the profile's sign-in or chats.
 - `--color` tints the icon orange, red, yellow, green, teal, blue, purple, or
   pink. `--icon` uses your own image (png, jpg, icns).
 - `--settings` controls what the profile takes from your main Claude:
@@ -61,9 +66,13 @@ claude-<name> [claude arguments]
 
   With `shared` and `copy`, MCP servers are copied too, including any keys in
   their settings. Sign-in, chats, history, and memory are never carried over.
-- `check` finds problems and tells you how to fix each one.
-- `remove` deletes the profile but keeps its sign-in and chats on disk, and
-  tells you how to delete those too.
+- `check` lists your profiles with their accounts, and under each one any
+  problem with how to fix it.
+- `remove` deletes the profile but keeps its sign-in and chats on disk. To
+  delete those too, remove `~/Library/Application Support/Claude-<name>` and
+  `~/.claude-<name>`, and in Keychain Access delete the profile's
+  "Claude Code-credentials" entry.
+- `init` prints the shell functions; your shell file runs it on startup.
 
 ## How it works
 
@@ -76,10 +85,7 @@ to keep in sync. For `work`:
 | App copy, icon, and log | `~/Library/Application Support/claude-profiles/work/` |
 | Desktop sign-in, chats, and settings | `~/Library/Application Support/Claude-work` |
 | Claude Code sign-in, settings, and memory | `~/.claude-work` |
-| Command | `claude-work`, a function in `~/.zshrc` or `~/.bash_profile` |
-
-Which file depends on `$SHELL`. With any other shell, `add` prints the lines for
-you to add yourself.
+| Command | `claude-work`, a shell function from `claude-profiles init` |
 
 Desktop keeps its data in the folder passed with `--user-data-dir`. Claude Code
 uses `CLAUDE_CONFIG_DIR` for its files and to keep its Keychain credentials
@@ -96,9 +102,8 @@ script writes Claude's "Block auto-updates" policy to `Claude-work-3p/`. It
 applies to this profile only. If that folder already exists, it's left alone,
 since it may hold third-party provider settings.
 
-`claude-work` stays quiet when everything is fine. It warns you if the profile
-is signed in to the same account as your main Claude, or if its account has
-changed.
+`claude-work` stays quiet when everything is fine, and warns you if the profile
+is signed in to the same account as your main Claude.
 
 ## Limitations
 
@@ -126,7 +131,7 @@ Your existing profile folders are reused, so you won't need to sign in again.
    ```
 
 3. Remove the `claude-multiprofile` block from `~/.zshrc`, or its alias will
-   override the new command.
+   override the new command. Install claude-profiles as above.
 4. Run `claude-profiles add work`. It replaces the old launcher and leaves
    `~/.claude-work` as is.
 5. Once everything works, remove the old Dock icons, run

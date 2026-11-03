@@ -11,15 +11,14 @@ set -eu
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
 CLAUDE_APP="/Applications/Claude.app"
 STATE="$HOME/Library/Application Support/claude-profiles"
+INSTALL_CLAUDE_CODE="curl -fsSL https://claude.ai/install.sh | bash"
+LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 SETUP_ITEMS="settings.json CLAUDE.md keybindings.json skills commands agents hooks output-styles
   plugins/installed_plugins.json plugins/known_marketplaces.json plugins/config.json
   plugins/blocklist.json plugins/cache plugins/marketplaces plugins/repos"
 
 COLOR_HUE_DEGREES="orange:25 red:330 yellow:55 green:110 teal:160 blue:210 purple:265 pink:300"
-
-
-# ---- Small helpers -----------------------------------------------------------
 
 say()  { printf '%s\n' "$*"; }
 warn() { printf 'claude-profiles: %s\n' "$*" >&2; }
@@ -50,52 +49,243 @@ profile_names() {
   done
 }
 
-app_version() {
-  [ -f "$1/Contents/Info.plist" ] || return 0
-  /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null
+
+# ---- Commands ----------------------------------------------------------------
+
+usage() {
+  cat <<'EOF'
+claude-profiles: several Claude accounts side by side on one Mac. See README.md.
+
+  claude-profiles add <name> [--color <c>] [--icon <image>] [--settings shared|copy|empty]
+  claude-profiles check
+  claude-profiles remove <name>
+  claude-profiles init         the claude-<name> commands, for eval in your shell file
+  claude-<name> [args]         Claude Code in that profile
+EOF
 }
 
-is_older() {
-  local version=$1 than=$2
-  [ "$version" != "$than" ] && [ "$(printf '%s\n%s\n' "$version" "$than" | sort -V | head -1)" = "$version" ]
+cmd_add() {
+  [ $# -ge 1 ] || { usage; exit 1; }
+  load_profile "$1"; shift
+  local color="" icon="" settings=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --color)    color=$(hue_of "${2:?}"); shift 2 ;;
+      --icon)     icon="${2:?}"; [ -f "$icon" ] || die "no such file: $icon"; shift 2 ;;
+      --settings) settings="${2:?}"; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [ -d "$CLAUDE_APP" ] || die "Claude is not installed in /Applications"
+  mkdir -p "$DIR"
+
+  if [ -n "$color" ]; then echo "$color" > "$DIR/color"; rm -f "$DIR/icon.png"; fi
+  if [ -n "$icon" ];  then sips -s format png "$icon" --out "$DIR/icon.png" >/dev/null; rm -f "$DIR/color"; fi
+
+  if [ ! -e "$CONFIG" ]; then
+    if [ -z "$settings" ]; then
+      say "Claude Code setup for '$NAME' (CLAUDE.md, settings, skills, commands, agents, plugins, MCP servers):"
+      say "  1) shared with your main Claude: change it once, both see it   [default]"
+      say "  2) copied now, then separate"
+      say "  3) start empty"
+      read -r -p "Choose 1-3: " answer
+      case "${answer:-1}" in 1) settings=shared ;; 2) settings=copy ;; 3) settings=empty ;; *) die "no such choice" ;; esac
+    fi
+    case "$settings" in shared|copy|empty) ;; *) die "--settings must be shared, copy or empty" ;; esac
+    seed_config "$settings"
+  elif [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then
+    seed_config shared
+  fi
+
+  make_launcher
+  "$LSREGISTER" -f "$LAUNCHER" 2>/dev/null || true
+
+  say "Profile '$NAME' is ready. Drag \"$LAUNCHER\" to the Dock, open it and"
+  say "sign in with \"Continue with email\" (README.md: Signing in to Desktop)."
+  shell_has_init || say "For the claude-$NAME command, add to ~/.zshrc or ~/.bash_profile: $(init_line)"
 }
 
-# Only inside oauthAccount: MCP server settings may hold an emailAddress too.
-account_email() {
-  sed -n '/"oauthAccount"/,/}/s/.*"emailAddress": *"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1
+# Run by the Dock launcher.
+cmd_launch() {
+  require_profile "$1"
+  PATH=/usr/bin:/bin:/usr/sbin:/sbin
+  [ -f "$DIR/launch.log" ] && tail -n 200 "$DIR/launch.log" > "$DIR/launch.log.tmp" && mv "$DIR/launch.log.tmp" "$DIR/launch.log"
+  exec >> "$DIR/launch.log" 2>&1
+
+  if [ -z "$(running_copy)" ]; then
+    refresh_copy || log "could not build the copy; opening the one there is"
+    block_self_update || log "could not block self-updates"
+  fi
+  if icon_outdated; then
+    local r; r=$(apply_profile_icon "$COPY" "$COPY")
+    [ "$r" = none ] || log "icon: $r"
+  fi
+  log "opening"
+  # Full flags even to focus a running copy: if it is quitting, macOS starts it
+  # again, and it must come back on the right account.
+  open -a "$COPY" --env "CLAUDE_CONFIG_DIR=$CONFIG" --args --user-data-dir="$DATA"
 }
 
-running_copy() {
-  local main_process="$COPY/Contents/MacOS/"
-  ps -axww -o pid=,command= | grep -F "$main_process" | grep -v grep || true
+# Run by claude-<name>.
+cmd_code() {
+  require_profile "$1"; shift
+  command -v claude >/dev/null || die "no claude command. Install it: $INSTALL_CLAUDE_CODE"
+  local now main
+  now=$(account_email "$CONFIG/.claude.json")
+  main=$(account_email "$HOME/.claude.json")
+  if [ -n "$now" ] && [ "$now" = "$main" ]; then
+    warn "'$NAME' is signed in to the same account as your main Claude ($now). Use /logout, then /login with the other account."
+  fi
+  CLAUDE_CONFIG_DIR="$CONFIG" exec claude "$@"
 }
 
-shell_rc() {
-  case "${SHELL:-}" in
-    */zsh)  echo "$HOME/.zshrc" ;;
-    */bash) echo "$HOME/.bash_profile" ;;
-    *)      echo "" ;;
-  esac
+cmd_init() {
+  local name
+  printf 'claude-profiles() { %q "$@"; }\n' "$SELF"
+  for name in $(profile_names); do
+    printf 'claude-%s() { %q code %s "$@"; }\n' "$name" "$SELF" "$name"
+  done
+}
+
+cmd_check() {
+  local problems=0 name main email desktop item
+  bad() { say "  ✗ $*"; problems=$((problems + 1)); }
+
+  main=$(account_email "$HOME/.claude.json")
+  printf '%-12s %-9s %s\n' PROFILE DESKTOP "CLAUDE CODE ACCOUNT"
+  printf '%-12s %-9s %s\n' "(main)" - "${main:--}"
+  [ -d "$CLAUDE_APP" ] || bad "Claude is not in /Applications"
+  command -v claude >/dev/null || bad "no claude command. Install it: $INSTALL_CLAUDE_CODE"
+  shell_has_init || bad "no claude-<name> commands. Add to ~/.zshrc or ~/.bash_profile: $(init_line)"
+
+  for name in $(profile_names); do
+    load_profile "$name"
+    email=$(account_email "$CONFIG/.claude.json")
+    desktop=stopped
+    [ -z "$(running_copy)" ] || desktop=running
+    printf '%-12s %-9s %s\n' "$name" "$desktop" "${email:--}"
+
+    launcher_is_current || bad "launcher missing or points elsewhere. Fix: claude-profiles add $name"
+    if [ -d "$COPY" ] && ! self_update_blocked; then
+      if [ -e "$DATA-3p" ]; then
+        bad "the copy can update itself and reopen on the wrong account. $DATA-3p holds settings this script never touches; set \"disableAutoUpdates\": true in its active configuration"
+      else
+        bad "the copy can update itself and reopen on the wrong account. Fix: click the launcher once"
+      fi
+    fi
+    if [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then
+      for item in $SETUP_ITEMS; do
+        if [ -e "$HOME/.claude/$item" ] && [ ! -L "$CONFIG/$item" ]; then
+          bad "$CONFIG/$item is not shared. Move it aside if it is there, then run: claude-profiles add $name"
+        fi
+      done
+    fi
+    if [ -z "$email" ]; then
+      bad "Claude Code is not signed in. Run claude-$name, then /login"
+    elif [ "$email" = "$main" ]; then
+      bad "Claude Code is signed in to the same account as your main Claude. In claude-$name: /logout, then /login with the other account"
+    fi
+  done
+
+  say ""
+  if [ "$problems" = 0 ]; then say "All good."; else say "$problems problem(s)."; exit 1; fi
+}
+
+cmd_remove() {
+  [ $# -eq 1 ] || { usage; exit 1; }
+  require_profile "$1"
+  [ -z "$(running_copy)" ] || die "Claude '$NAME' is open. Quit it first"
+  rm -rf "$LAUNCHER"
+  rm -rf "$DIR" 2>/dev/null || die "could not delete $DIR. Drag it to the Trash in Finder, then run this again"
+  unblock_self_update
+  say "Removed '$NAME'. Its sign-in and chats stay in $DATA and $CONFIG"
+  say "(README.md says how to delete them). Unpin the launcher from the Dock."
 }
 
 
-# ---- Icons -------------------------------------------------------------------
+# ---- Claude Code settings ------------------------------------------------------
+
+seed_config() {
+  local mode=$1 item
+  mkdir -p "$CONFIG"
+  echo "$mode" > "$DIR/settings"
+  [ "$mode" = empty ] && return 0
+  for item in $SETUP_ITEMS; do
+    [ -e "$HOME/.claude/$item" ] || continue
+    [ -e "$CONFIG/$item" ] || [ -L "$CONFIG/$item" ] && continue
+    mkdir -p "$(dirname "$CONFIG/$item")"
+    if [ "$mode" = shared ]; then ln -s "$HOME/.claude/$item" "$CONFIG/$item"; else cp -R "$HOME/.claude/$item" "$CONFIG/$item"; fi
+  done
+  if [ "$mode" = copy ]; then
+    # Copied files still point into ~/.claude.
+    for item in settings.json plugins/installed_plugins.json plugins/known_marketplaces.json; do
+      if [ -f "$CONFIG/$item" ]; then sed -i '' "s#$HOME/.claude/#$CONFIG/#g" "$CONFIG/$item"; fi
+    done
+  fi
+  copy_mcp_servers
+}
+
+# The rest of ~/.claude.json is your main login.
+copy_mcp_servers() {
+  [ -f "$HOME/.claude.json" ] && [ ! -e "$CONFIG/.claude.json" ] || return 0
+  local servers
+  servers=$(plutil -extract mcpServers json -o - "$HOME/.claude.json" 2>/dev/null) || return 0
+  (umask 077; printf '{ "mcpServers": %s }\n' "$servers" > "$CONFIG/.claude.json")
+}
+
+init_line() {
+  printf 'eval "$(%q init)"' "$SELF"
+}
+
+shell_has_init() {
+  grep -qs 'claude-profiles init' "$HOME/.zshrc" "$HOME/.bash_profile"
+}
+
+
+# ---- Launcher and icons --------------------------------------------------------
+
+# Apps started from the Dock get no PATH, hence the full path to this script.
+make_launcher() {
+  local script out
+  script=$(printf '%s' "$SELF" | sed 's/[\\"]/\\&/g')
+  mkdir -p "$HOME/Applications"
+  rm -rf "$LAUNCHER"
+  out=$(osacompile -o "$LAUNCHER" -e \
+    "do shell script quoted form of \"$script\" & \" launch $NAME > /dev/null 2>&1 &\"" 2>&1) ||
+    die "could not build the launcher: $out"
+  # Its own bundle id, so macOS keeps each profile's launcher apart.
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string local.claude-profiles.$NAME" "$LAUNCHER/Contents/Info.plist"
+  if [ "$(apply_profile_icon "$LAUNCHER" "$CLAUDE_APP")" != ok ]; then
+    sips -s format png "$(ls "$CLAUDE_APP/Contents/Resources/"*.icns | head -1)" --out "$DIR/.claude.png" >/dev/null
+    set_icon "$DIR/.claude.png" "$LAUNCHER" >/dev/null
+  fi
+}
+
+launcher_is_current() {
+  [ -d "$LAUNCHER" ] && osadecompile "$LAUNCHER" 2>/dev/null | grep -qF "$SELF"
+}
+
+hue_of() {
+  local pair
+  for pair in $COLOR_HUE_DEGREES; do [ "${pair%%:*}" = "$1" ] && { echo "${pair#*:}"; return; }; done
+  die "unknown colour '$1'. Choose one of: $(for p in $COLOR_HUE_DEGREES; do printf '%s ' "${p%%:*}"; done)"
+}
+
+# Prints ok, none (no icon chosen) or what went wrong.
+apply_profile_icon() {
+  local app=$1 source_app=$2 png="$DIR/icon.png"
+  if [ -f "$DIR/color" ]; then
+    png="$DIR/.tinted.png"
+    local r; r=$(tint_icon "$source_app" "$(cat "$DIR/color")" "$png")
+    [ "$r" = ok ] || { echo "$r"; return; }
+  fi
+  [ -f "$png" ] || { echo none; return; }
+  set_icon "$png" "$app"
+}
 
 icon_outdated() {
   local custom_icon="$COPY/Icon"$'\r'
   [ ! -e "$custom_icon" ] || [ "$DIR/color" -nt "$custom_icon" ] || [ "$DIR/icon.png" -nt "$custom_icon" ]
-}
-
-set_icon() {
-  local image=$1 app=$2
-  osascript -l JavaScript - "$image" "$app" <<'JS'
-ObjC.import('AppKit');
-function run(argv) {
-  var image = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
-  if (image.isNil()) return 'cannot read ' + argv[0];
-  return $.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[1], 0) ? 'ok' : 'cannot set icon';
-}
-JS
 }
 
 tint_icon() {
@@ -119,26 +309,20 @@ function run(argv) {
 JS
 }
 
-hue_of() {
-  local pair
-  for pair in $COLOR_HUE_DEGREES; do [ "${pair%%:*}" = "$1" ] && { echo "${pair#*:}"; return; }; done
-  die "unknown colour '$1'. Choose one of: $(for p in $COLOR_HUE_DEGREES; do printf '%s ' "${p%%:*}"; done)"
+set_icon() {
+  local image=$1 app=$2
+  osascript -l JavaScript - "$image" "$app" <<'JS'
+ObjC.import('AppKit');
+function run(argv) {
+  var image = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
+  if (image.isNil()) return 'cannot read ' + argv[0];
+  return $.NSWorkspace.sharedWorkspace.setIconForFileOptions(image, argv[1], 0) ? 'ok' : 'cannot set icon';
 }
-
-# Prints ok, none (no icon chosen) or what went wrong.
-apply_profile_icon() {
-  local app=$1 source_app=$2 png="$DIR/icon.png"
-  if [ -f "$DIR/color" ]; then
-    png="$DIR/.tinted.png"
-    local r; r=$(tint_icon "$source_app" "$(cat "$DIR/color")" "$png")
-    [ "$r" = ok ] || { echo "$r"; return; }
-  fi
-  [ -f "$png" ] || { echo none; return; }
-  set_icon "$png" "$app"
+JS
 }
 
 
-# ---- Desktop: the copy, the launcher, updates ----------------------------------
+# ---- The copy of Claude --------------------------------------------------------
 
 # Called as refresh_copy || log, where set -e is off, so each step checks itself.
 refresh_copy() {
@@ -146,12 +330,22 @@ refresh_copy() {
   want=$(app_version "$CLAUDE_APP")
   have=$(app_version "$COPY")
   [ -n "$want" ] || return 1
-  [ -n "$have" ] && ! is_older "$have" "$want" && return 0
+  [ "$have" = "$want" ] && return 0
   log "building the copy from Claude $want (had: ${have:-none})"
   rm -rf "$COPY.new" || return 1
   cp -Rc "$CLAUDE_APP" "$COPY.new" 2>/dev/null ||
     { rm -rf "$COPY.new" && cp -R "$CLAUDE_APP" "$COPY.new"; } || return 1
   rm -rf "$COPY" && mv "$COPY.new" "$COPY"
+}
+
+app_version() {
+  [ -f "$1/Contents/Info.plist" ] || return 0
+  /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null
+}
+
+running_copy() {
+  local main_process="$COPY/Contents/MacOS/"
+  ps -axww -o pid=,command= | grep -F "$main_process" | grep -v grep || true
 }
 
 # A self-update relaunches the copy without --user-data-dir, on the wrong account.
@@ -185,314 +379,17 @@ self_update_blocked() {
   grep -qs '"disableAutoUpdates" *: *true' "$DATA-3p/configLibrary/"*.json
 }
 
-# Apps started from the Dock get no PATH, hence the full path to this script.
-make_launcher() {
-  local tmp script
-  tmp=$(mktemp -d)
-  script=$(printf '%s' "$SELF" | sed 's/[\\"]/\\&/g')
-  printf 'do shell script quoted form of "%s" & " launch %s > /dev/null 2>&1 &"\n' "$script" "$NAME" > "$tmp/launcher.applescript"
-  mkdir -p "$HOME/Applications"
-  rm -rf "$LAUNCHER"
-  local out
-  out=$(osacompile -o "$LAUNCHER" "$tmp/launcher.applescript" 2>&1) || die "could not build the launcher: $out"
-  rm -rf "$tmp"
-  # Its own bundle id, so macOS keeps each profile's launcher apart.
-  /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string local.claude-profiles.$NAME" "$LAUNCHER/Contents/Info.plist"
-  if [ "$(apply_profile_icon "$LAUNCHER" "$CLAUDE_APP")" != ok ]; then
-    sips -s format png "$(ls "$CLAUDE_APP/Contents/Resources/"*.icns | head -1)" --out "$DIR/.claude.png" >/dev/null
-    set_icon "$DIR/.claude.png" "$LAUNCHER" >/dev/null
-  fi
+# Only inside oauthAccount: MCP server settings may hold an emailAddress too.
+account_email() {
+  sed -n '/"oauthAccount"/,/}/s/.*"emailAddress": *"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-launcher_is_current() {
-  [ -d "$LAUNCHER" ] && osadecompile "$LAUNCHER" 2>/dev/null | grep -qF "$SELF"
-}
-
-
-# ---- Claude Code: settings and the terminal command ----------------------------
-
-seed_config() {
-  local mode=$1 item
-  mkdir -p "$CONFIG"
-  echo "$mode" > "$DIR/settings"
-  [ "$mode" = empty ] && return 0
-  for item in $SETUP_ITEMS; do
-    [ -e "$HOME/.claude/$item" ] || continue
-    [ -e "$CONFIG/$item" ] || [ -L "$CONFIG/$item" ] && continue
-    mkdir -p "$(dirname "$CONFIG/$item")"
-    if [ "$mode" = shared ]; then ln -s "$HOME/.claude/$item" "$CONFIG/$item"; else cp -R "$HOME/.claude/$item" "$CONFIG/$item"; fi
-  done
-  if [ "$mode" = copy ]; then
-    # Copied files still point into ~/.claude.
-    for item in settings.json plugins/installed_plugins.json plugins/known_marketplaces.json; do
-      if [ -f "$CONFIG/$item" ]; then sed -i '' "s#$HOME/.claude/#$CONFIG/#g" "$CONFIG/$item"; fi
-    done
-  fi
-  copy_mcp_servers
-}
-
-# The rest of ~/.claude.json is your main login.
-copy_mcp_servers() {
-  [ -f "$HOME/.claude.json" ] && [ ! -e "$CONFIG/.claude.json" ] || return 0
-  osascript -l JavaScript - "$HOME/.claude.json" "$CONFIG/.claude.json" <<'JS' >/dev/null
-ObjC.import('Foundation');
-function run(argv) {
-  var text = $.NSString.stringWithContentsOfFileEncodingError(argv[0], $.NSUTF8StringEncoding, null).js;
-  var servers = JSON.parse(text).mcpServers;
-  if (!servers) return 'none';
-  $(JSON.stringify({ mcpServers: servers }, null, 2))
-    .writeToFileAtomicallyEncodingError(argv[1], true, $.NSUTF8StringEncoding, null);
-  return 'ok';
-}
-JS
-  [ -f "$CONFIG/.claude.json" ] && chmod 600 "$CONFIG/.claude.json"
-  return 0
-}
-
-write_shell_block() {
-  local rc name tmp
-  rc=$(shell_rc)
-  if [ -z "$rc" ]; then
-    warn "unknown shell '${SHELL:-}': add these to your shell yourself:"
-    rc=/dev/stderr
-  elif [ -f "$rc" ]; then
-    tmp="$rc.claude-profiles.tmp"
-    awk '/^# >>> claude-profiles >>>$/{skip=1} !skip{print} /^# <<< claude-profiles <<<$/{skip=0}
-         END{exit skip}' "$rc" > "$tmp" || { rm -f "$tmp"; die "$rc has '# >>> claude-profiles >>>' without its end line; fix it by hand"; }
-    cat "$tmp" > "$rc"   # cat, not mv: keeps a symlinked rc file a symlink
-    rm "$tmp"
-  fi
-  {
-    echo "# >>> claude-profiles >>>"
-    printf 'claude-profiles() { %q "$@"; }\n' "$SELF"
-    for name in $(profile_names); do
-      printf 'claude-%s() { %q code %s "$@"; }\n' "$name" "$SELF" "$name"
-    done
-    echo "# <<< claude-profiles <<<"
-  } >> "$rc"
-}
-
-
-# ---- Commands ----------------------------------------------------------------
-
-usage() {
-  cat <<'EOF'
-claude-profiles: several Claude accounts side by side on one Mac
-
-  claude-profiles add <name> [--color <c>] [--icon <image>] [--settings shared|copy|empty]
-        create a profile, or repair an existing one (launcher, shell command)
-        colours: orange red yellow green teal blue purple pink
-  claude-profiles list              profiles and their accounts
-  claude-profiles check             find what is broken, and say how to fix it
-  claude-profiles remove <name>     remove a profile; its login and chats stay on disk
-
-  claude-<name> [args]              Claude Code in that profile
-  Dock: ~/Applications/Claude <name>.app      Claude Desktop in that profile
-EOF
-}
-
-cmd_add() {
-  [ $# -ge 1 ] || { usage; exit 1; }
-  load_profile "$1"; shift
-  local color="" icon="" settings=""
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --color)    color=$(hue_of "${2:?}"); shift 2 ;;
-      --icon)     icon="${2:?}"; [ -f "$icon" ] || die "no such file: $icon"; shift 2 ;;
-      --settings) settings="${2:?}"; shift 2 ;;
-      *) die "unknown option: $1" ;;
-    esac
-  done
-  [ -d "$CLAUDE_APP" ] || die "Claude is not installed in /Applications"
-  local fresh=1
-  [ -d "$DIR" ] && fresh=0
-  mkdir -p "$DIR"
-
-  if [ -n "$color" ]; then echo "$color" > "$DIR/color"; rm -f "$DIR/icon.png"; fi
-  if [ -n "$icon" ];  then sips -s format png "$icon" --out "$DIR/icon.png" >/dev/null; rm -f "$DIR/color"; fi
-
-  if [ ! -e "$CONFIG" ]; then
-    if [ -z "$settings" ]; then
-      say "Claude Code setup for '$NAME' (CLAUDE.md, settings, skills, commands, agents, plugins, MCP servers):"
-      say "  1) shared with your main Claude: change it once, both see it   [default]"
-      say "  2) copied now, then separate"
-      say "  3) start empty"
-      read -r -p "Choose 1-3: " answer
-      case "${answer:-1}" in 1) settings=shared ;; 2) settings=copy ;; 3) settings=empty ;; *) die "no such choice" ;; esac
-    fi
-    case "$settings" in shared|copy|empty) ;; *) die "--settings must be shared, copy or empty" ;; esac
-    seed_config "$settings"
-  else
-    say "Keeping the existing Claude Code folder $CONFIG"
-    if [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then seed_config shared; fi
-  fi
-
-  make_launcher
-  write_shell_block
-  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$LAUNCHER" 2>/dev/null || true
-
-  if [ "$fresh" = 1 ]; then say "Created profile '$NAME'."; else say "Repaired profile '$NAME'."; fi
-  cat <<EOF
-
-Next:
-  1. Drag "$LAUNCHER" to the Dock.
-     Pin that launcher, not the window tile of a running Claude.
-  2. Click it and sign in to the account for '$NAME'.
-     The first start takes a few seconds: it builds the profile's copy of Claude.
-     Sign in with "Continue with email" and type the code from the email: a sign-in
-     in the browser returns to your main Claude instead (see the README).
-  3. Open a new terminal, run claude-$NAME and sign in there as well (/login).
-  4. claude-profiles check
-EOF
-}
-
-cmd_list() {
-  local name now
-  printf '%-12s %-9s %s\n' PROFILE DESKTOP "CLAUDE CODE ACCOUNT"
-  printf '%-12s %-9s %s\n' "(main)" "-" "$(account_email "$HOME/.claude.json")"
-  for name in $(profile_names); do
-    load_profile "$name"
-    now=stopped
-    [ -n "$(running_copy)" ] && now=running
-    printf '%-12s %-9s %s\n' "$name" "$now" "$(account_email "$CONFIG/.claude.json")"
-  done
-}
-
-cmd_check() {
-  local problems=0 name rc main email others
-  bad()  { say "  ✗ $*"; problems=$((problems + 1)); }
-  good() { say "  ✓ $*"; }
-
-  say "General"
-  if [ -d "$CLAUDE_APP" ]; then good "Claude $(app_version "$CLAUDE_APP") in /Applications"; else bad "Claude is not in /Applications"; fi
-  if command -v claude >/dev/null; then good "claude command: $(command -v claude)"; else bad "no claude command. Install it: curl -fsSL https://claude.ai/install.sh | bash"; fi
-  rc=$(shell_rc)
-  if [ -n "$rc" ] && grep -qF "claude-profiles() { $(printf %q "$SELF")" "$rc" 2>/dev/null; then
-    good "shell commands in $rc"
-  else
-    bad "shell commands missing in ${rc:-your shell file}. Fix: claude-profiles add <any profile>"
-  fi
-
-  main=$(account_email "$HOME/.claude.json")
-  others=""
-  for name in $(profile_names); do
-    load_profile "$name"
-    say ""
-    say "Profile $name"
-
-    if launcher_is_current; then good "launcher $LAUNCHER"; else bad "launcher missing or points elsewhere. Fix: claude-profiles add $name"; fi
-    if [ -n "$rc" ] && grep -qE "^[[:space:]]*alias claude-$name=" "$rc"; then
-      bad "an old alias claude-$name in $rc hides the command. Delete that line"
-    fi
-
-    if [ ! -d "$COPY" ]; then
-      good "copy of Claude: not built yet (the launcher builds it on the first click)"
-    elif is_older "$(app_version "$COPY")" "$(app_version "$CLAUDE_APP")"; then
-      good "copy of Claude $(app_version "$COPY"): updates to $(app_version "$CLAUDE_APP") on the next click"
-    else
-      good "copy of Claude $(app_version "$COPY")"
-    fi
-    if [ -d "$COPY" ] && { [ -f "$DIR/color" ] || [ -f "$DIR/icon.png" ]; } && icon_outdated; then
-      good "icon: updates on the next click of the launcher"
-    fi
-    if [ ! -d "$COPY" ] || self_update_blocked; then
-      good "the copy does not update itself"
-    elif [ -e "$DATA-3p" ]; then
-      bad "the copy can update itself and reopen on the wrong account. $DATA-3p holds settings this script never touches; set \"disableAutoUpdates\": true in its active configuration"
-    else
-      bad "the copy can update itself and reopen on the wrong account. Fix: click the launcher once"
-    fi
-
-    if [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then
-      local item
-      for item in $SETUP_ITEMS; do
-        if [ -e "$HOME/.claude/$item" ] && [ ! -L "$CONFIG/$item" ]; then
-          bad "$CONFIG/$item is not shared. Move it aside if it is there, then run: claude-profiles add $name"
-        fi
-      done
-    fi
-
-    email=$(account_email "$CONFIG/.claude.json")
-    if [ -z "$email" ]; then
-      bad "Claude Code is not signed in. Run claude-$name, then /login"
-    elif [ "$email" = "$main" ]; then
-      bad "Claude Code is signed in to the same account as your main Claude ($email). In claude-$name: /logout, then /login with the other account"
-    elif printf '%s\n' "$others" | grep -qxF "$email"; then
-      bad "Claude Code shares its account ($email) with another profile"
-    else
-      good "Claude Code account $email"
-    fi
-    others=$(printf '%s\n%s' "$others" "$email")
-  done
-
-  say ""
-  if [ "$problems" = 0 ]; then say "All good."; else say "$problems problem(s)."; exit 1; fi
-}
-
-cmd_remove() {
-  [ $# -eq 1 ] || { usage; exit 1; }
-  require_profile "$1"
-  [ -z "$(running_copy)" ] || die "Claude '$NAME' is open. Quit it first"
-  rm -rf "$LAUNCHER"
-  rm -rf "$DIR" 2>/dev/null || die "could not delete $DIR. Drag it to the Trash in Finder, then run this again"
-  unblock_self_update
-  write_shell_block
-  cat <<EOF
-Removed profile '$NAME'. Kept, in case you want it back (add $NAME again):
-  $DATA     Desktop login and chats
-  $CONFIG   Claude Code login, settings and memory
-To delete them for good, remove both folders, and in Keychain Access delete the
-"Claude Code-credentials" entry of this profile. Unpin the launcher from the Dock.
-EOF
-}
-
-cmd_launch() {
-  require_profile "$1"
-  PATH=/usr/bin:/bin:/usr/sbin:/sbin
-  [ -f "$DIR/launch.log" ] && tail -n 200 "$DIR/launch.log" > "$DIR/launch.log.tmp" && mv "$DIR/launch.log.tmp" "$DIR/launch.log"
-  exec >> "$DIR/launch.log" 2>&1
-
-  if [ -z "$(running_copy)" ]; then
-    refresh_copy || log "could not build the copy; opening the one there is"
-    block_self_update || log "could not block self-updates"
-  fi
-  if icon_outdated; then
-    local r; r=$(apply_profile_icon "$COPY" "$COPY")
-    [ "$r" = none ] || log "icon: $r"
-  fi
-  log "opening"
-  open_copy
-}
-
-# Full flags even to focus a running copy: if it is quitting, macOS starts it
-# again, and it must come back on the right account.
-open_copy() {
-  open -a "$COPY" --env "CLAUDE_CONFIG_DIR=$CONFIG" --args --user-data-dir="$DATA"
-}
-
-cmd_code() {
-  require_profile "$1"; shift
-  command -v claude >/dev/null || die "no claude command. Install it: curl -fsSL https://claude.ai/install.sh | bash"
-  local now main last
-  now=$(account_email "$CONFIG/.claude.json")
-  main=$(account_email "$HOME/.claude.json")
-  last=$(cat "$DIR/account" 2>/dev/null || true)
-  if [ -n "$now" ]; then
-    if [ "$now" = "$main" ]; then
-      warn "'$NAME' is signed in to the same account as your main Claude ($now). Use /logout, then /login with the other account."
-    elif [ -n "$last" ] && [ "$now" != "$last" ]; then
-      warn "'$NAME' was signed in as $last, now as $now."
-    fi
-    [ "$now" = "$last" ] || echo "$now" > "$DIR/account"
-  fi
-  CLAUDE_CONFIG_DIR="$CONFIG" exec claude "$@"
-}
 
 case "${1:-}" in
   add)    shift; cmd_add "$@" ;;
-  list)   shift; cmd_list ;;
   check)  shift; cmd_check ;;
   remove) shift; cmd_remove "$@" ;;
+  init)   shift; cmd_init ;;
   launch) shift; cmd_launch "$@" ;;
   code)   shift; cmd_code "$@" ;;
   ""|-h|--help|help) usage ;;
