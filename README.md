@@ -70,6 +70,7 @@ claude-<name> [claude arguments]
   delete those too, remove `~/.claude-<name>` and, in
   `~/Library/Application Support`, `Claude-<name>` and `Claude-<name>-3p`.
   Then in Keychain Access delete the profile's "Claude Code-credentials" entry.
+
 ## How it works
 
 A profile is just a name. Every path is derived from it, so there's no registry

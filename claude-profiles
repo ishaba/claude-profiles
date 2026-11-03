@@ -43,6 +43,14 @@ require_profile() {
   [ -d "$DIR" ] || die "no profile '$NAME'. Create it with: claude-profiles add $NAME"
 }
 
+# One command at a time per profile: two quick clicks on the launcher must not
+# build the copy twice at once. The kernel drops the lock when the script exits.
+lock_profile() {
+  mkdir -p "$STATE"
+  exec 9> "$STATE/.$NAME.lock"
+  lockf -t 120 9 || die "another claude-profiles command is busy with '$NAME'"
+}
+
 profile_names() {
   ls "$STATE" 2>/dev/null || true
 }
@@ -74,6 +82,7 @@ cmd_add() {
     esac
   done
   [ -d "$CLAUDE_APP" ] || die "Claude is not installed in /Applications"
+  lock_profile
   link_command claude-profiles
   link_command "claude-$NAME"
   mkdir -p "$DIR"
@@ -92,8 +101,9 @@ cmd_add() {
     fi
     case "$settings" in shared|copy|empty) ;; *) die "--settings must be shared, copy or empty" ;; esac
     seed_config "$settings"
-  elif [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then
-    seed_config shared
+  else
+    [ -z "$settings" ] || warn "$CONFIG already exists, so --settings is ignored"
+    [ "$(cat "$DIR/settings" 2>/dev/null)" != shared ] || seed_config shared
   fi
 
   make_launcher
@@ -108,19 +118,20 @@ cmd_add() {
 cmd_launch() {
   require_profile "$1"
   PATH=/usr/bin:/bin:/usr/sbin:/sbin
-  [ -f "$DIR/launch.log" ] && tail -n 200 "$DIR/launch.log" > "$DIR/launch.log.tmp" && mv "$DIR/launch.log.tmp" "$DIR/launch.log"
-  exec >> "$DIR/launch.log" 2>&1
+  lock_profile
+  exec > "$DIR/launch.log" 2>&1   # the last launch only; check reads it
 
   if ! copy_running; then
-    refresh_copy || log "could not build the copy; opening the one there is"
-    block_self_update || log "could not block self-updates"
+    refresh_copy || log "problem: could not build the copy; opening the one there is"
+    block_self_update || log "problem: could not block self-updates"
   fi
   if icon_outdated; then
-    set_profile_icon "$COPY" || log "could not set the icon"
+    set_profile_icon "$COPY" || log "problem: could not set the icon"
   fi
   log "opening"
   # Full flags even to focus a running copy: if it is quitting, macOS starts it
-  # again, and it must come back on the right account.
+  # again, and it must come back on the right account. When it is running, open
+  # logs that the environment could not be set: that is harmless.
   open -a "$COPY" --env "CLAUDE_CONFIG_DIR=$CONFIG" --args --user-data-dir="$DATA"
 }
 
@@ -159,6 +170,7 @@ cmd_check() {
     [ "$(readlink "$BIN/claude-$name")" = "$SELF" ] || bad "no claude-$name command. Fix: claude-profiles add $name"
     [ ! -d "$COPY" ] || self_update_blocked ||
       bad "the copy can update itself and reopen on the wrong account. Fix: click the launcher once; if $DATA-3p was there before, set \"disableAutoUpdates\": true in its active configuration"
+    ! grep -qs 'problem:' "$DIR/launch.log" || bad "the last launch had a problem. See $DIR/launch.log"
     if [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then
       for item in $SETUP_ITEMS; do
         if [ -e "$HOME/.claude/$item" ] && [ ! -L "$CONFIG/$item" ]; then
@@ -180,6 +192,7 @@ cmd_check() {
 cmd_remove() {
   [ $# -eq 1 ] || { usage; exit 1; }
   require_profile "$1"
+  lock_profile
   ! copy_running || die "Claude '$NAME' is open. Quit it first"
   rm -rf "$LAUNCHER"
   ! our_link "$BIN/claude-$NAME" || rm "$BIN/claude-$NAME"
@@ -252,7 +265,7 @@ hue_of() {
   case "$1" in
     orange) echo 25 ;;  red)  echo 330 ;;  yellow) echo 55 ;;  green) echo 110 ;;
     teal)   echo 160 ;; blue) echo 210 ;;  purple) echo 265 ;; pink)  echo 300 ;;
-    *) die "unknown colour '$1'. Choose one of: orange red yellow green teal blue purple pink" ;;
+    *) die "unknown color '$1'. Choose one of: orange red yellow green teal blue purple pink" ;;
   esac
 }
 
@@ -313,22 +326,24 @@ copy_running() {
 
 # A self-update relaunches the copy without --user-data-dir, on the wrong account.
 # The -3p folder may hold your own provider setup, so it is written only when absent.
+# Written next to it, then moved into place, so a half-written policy never
+# looks like one.
 block_self_update() {
-  local root="$DATA-3p/configLibrary" id
+  local new="$DATA-3p.new" id
   [ -e "$DATA-3p" ] && return 0
   id=$(uuidgen | tr 'A-Z' 'a-z')
-  mkdir -p "$root" &&
-    printf '{ "disableAutoUpdates": true }\n' > "$root/$id.json" &&
-    printf '{ "appliedId": "%s", "entries": [ { "id": "%s", "name": "Default" } ] }\n' "$id" "$id" > "$root/_meta.json"
+  rm -rf "$new" && mkdir -p "$new/configLibrary" &&
+    printf '{ "disableAutoUpdates": true }\n' > "$new/configLibrary/$id.json" &&
+    printf '{ "appliedId": "%s", "entries": [ { "id": "%s", "name": "Default" } ] }\n' "$id" "$id" > "$new/configLibrary/_meta.json" &&
+    mv "$new" "$DATA-3p"
 }
 
 self_update_blocked() {
   grep -qs '"disableAutoUpdates" *: *true' "$DATA-3p/configLibrary/"*.json
 }
 
-# Only inside oauthAccount: MCP server settings may hold an emailAddress too.
 account_email() {
-  sed -n '/"oauthAccount"/,/}/s/.*"emailAddress": *"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1
+  plutil -extract oauthAccount.emailAddress raw -o - "$1" 2>/dev/null || true
 }
 
 
@@ -339,7 +354,7 @@ case "$me" in
 esac
 
 case "${1:-}" in
-  add|check|remove|launch|code) cmd=$1; shift; "cmd_$cmd" "$@" ;;
+  add|check|remove|launch) cmd=$1; shift; "cmd_$cmd" "$@" ;;
   ""|-h|--help|help) usage ;;
   *) usage; exit 1 ;;
 esac
