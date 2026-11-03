@@ -1,16 +1,10 @@
 #!/bin/bash
-# claude-profiles: several Claude accounts side by side on one Mac.
+# Several Claude accounts side by side on one Mac. How it works: README.md.
 #
-# Your main Claude stays as it is: /Applications/Claude.app and ~/.claude.
-# An extra profile is just a name; load_profile derives every path from it, so
-# there is no registry to keep in sync. Desktop keeps its state in the folder
-# given by --user-data-dir, Claude Code (and its Keychain login) in CLAUDE_CONFIG_DIR.
-#
-# Each profile runs its own copy of Claude.app: the Dock tile belongs to the
-# running app, so only a copy can carry its own icon. Only the launcher creates
-# or changes that copy. macOS lets a program modify an app it made itself, so
-# the launcher can rebuild the copy after an update and restore its icon
-# without extra permissions.
+# A profile is just a name: load_profile derives every path from it, so there
+# is no registry. Each profile runs its own copy of Claude.app, and only the
+# launcher (cmd_launch) creates or changes it: macOS lets an app modify only
+# the apps it created itself.
 
 set -eu
 
@@ -18,14 +12,11 @@ SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE
 CLAUDE_APP="/Applications/Claude.app"
 STATE="$HOME/Library/Application Support/claude-profiles"
 
-# What a new profile can take from ~/.claude: setup you would otherwise redo by
-# hand. Never logins, chats, history or memory.
 SETUP_ITEMS="settings.json CLAUDE.md keybindings.json skills commands agents hooks output-styles
   plugins/installed_plugins.json plugins/known_marketplaces.json plugins/config.json
   plugins/blocklist.json plugins/cache plugins/marketplaces plugins/repos"
 
-# Dock icon colours: how far to rotate the hue of Claude's own icon, in degrees.
-COLORS="orange:25 red:330 yellow:55 green:110 teal:160 blue:210 purple:265 pink:300"
+COLOR_HUE_DEGREES="orange:25 red:330 yellow:55 green:110 teal:160 blue:210 purple:265 pink:300"
 
 
 # ---- Small helpers -----------------------------------------------------------
@@ -35,7 +26,6 @@ warn() { printf 'claude-profiles: %s\n' "$*" >&2; }
 die()  { warn "$*"; exit 1; }
 log()  { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 
-# Every path of a profile comes from its name, here and only here.
 load_profile() {
   NAME="$1"
   [[ "$NAME" =~ ^[a-z][a-z0-9-]{0,30}$ ]] ||
@@ -65,21 +55,19 @@ app_version() {
   /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$1/Contents/Info.plist" 2>/dev/null
 }
 
-# True when version $1 is older than version $2.
 is_older() {
-  [ "$1" != "$2" ] && [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" = "$1" ]
+  local version=$1 than=$2
+  [ "$version" != "$than" ] && [ "$(printf '%s\n%s\n' "$version" "$than" | sort -V | head -1)" = "$version" ]
 }
 
-# The Claude Code account signed in with a given .claude.json, or nothing.
-# Read only inside "oauthAccount": an MCP server's settings may hold an emailAddress too.
+# Only inside oauthAccount: MCP server settings may hold an emailAddress too.
 account_email() {
   sed -n '/"oauthAccount"/,/}/s/.*"emailAddress": *"\([^"]*\)".*/\1/p' "$1" 2>/dev/null | head -1
 }
 
-# Process ids of the profile's copy of Claude, main process only (helpers live
-# under Contents/Frameworks), each with its full command line.
 running_copy() {
-  ps -axww -o pid=,command= | grep -F "$COPY/Contents/MacOS/" | grep -v grep || true
+  local main_process="$COPY/Contents/MacOS/"
+  ps -axww -o pid=,command= | grep -F "$main_process" | grep -v grep || true
 }
 
 shell_rc() {
@@ -93,16 +81,14 @@ shell_rc() {
 
 # ---- Icons -------------------------------------------------------------------
 
-# A custom icon is a hidden file named "Icon\r" in the bundle. Claude updates
-# replace the bundle, which drops it. The copy needs its icon (again) when it
-# has none, or when the choice changed since.
 icon_outdated() {
-  local icon="$COPY/Icon"$'\r'
-  [ ! -e "$icon" ] || [ "$DIR/color" -nt "$icon" ] || [ "$DIR/icon.png" -nt "$icon" ]
+  local custom_icon="$COPY/Icon"$'\r'
+  [ ! -e "$custom_icon" ] || [ "$DIR/color" -nt "$custom_icon" ] || [ "$DIR/icon.png" -nt "$custom_icon" ]
 }
 
-set_icon() {  # set_icon <image file> <app>
-  osascript -l JavaScript - "$1" "$2" <<'JS'
+set_icon() {
+  local image=$1 app=$2
+  osascript -l JavaScript - "$image" "$app" <<'JS'
 ObjC.import('AppKit');
 function run(argv) {
   var image = $.NSImage.alloc.initWithContentsOfFile(argv[0]);
@@ -112,11 +98,11 @@ function run(argv) {
 JS
 }
 
-tint_icon() {  # tint_icon <app to take the icon from> <hue degrees> <png to write>
-  local icns
-  icns=$(ls "$1/Contents/Resources/"*.icns 2>/dev/null | head -1)
-  [ -n "$icns" ] || { echo "no icon in $1"; return 0; }
-  osascript -l JavaScript - "$icns" "$2" "$3" <<'JS'
+tint_icon() {
+  local source_app=$1 hue=$2 png=$3 icns
+  icns=$(ls "$source_app/Contents/Resources/"*.icns 2>/dev/null | head -1)
+  [ -n "$icns" ] || { echo "no icon in $source_app"; return 0; }
+  osascript -l JavaScript - "$icns" "$hue" "$png" <<'JS'
 ObjC.import('AppKit'); ObjC.import('CoreImage');
 function run(argv) {
   var input = $.CIImage.imageWithData($.NSData.dataWithContentsOfFile(argv[0]));
@@ -135,29 +121,26 @@ JS
 
 hue_of() {
   local pair
-  for pair in $COLORS; do [ "${pair%%:*}" = "$1" ] && { echo "${pair#*:}"; return; }; done
-  die "unknown colour '$1'. Choose one of: $(for p in $COLORS; do printf '%s ' "${p%%:*}"; done)"
+  for pair in $COLOR_HUE_DEGREES; do [ "${pair%%:*}" = "$1" ] && { echo "${pair#*:}"; return; }; done
+  die "unknown colour '$1'. Choose one of: $(for p in $COLOR_HUE_DEGREES; do printf '%s ' "${p%%:*}"; done)"
 }
 
-# Put the profile's chosen icon on an app. A colour tints Claude's icon taken
-# from <source app>. Prints "ok", "none" (no icon chosen) or what went wrong.
-apply_profile_icon() {  # apply_profile_icon <app> <source app>
-  local png="$DIR/icon.png"
+# Prints ok, none (no icon chosen) or what went wrong.
+apply_profile_icon() {
+  local app=$1 source_app=$2 png="$DIR/icon.png"
   if [ -f "$DIR/color" ]; then
     png="$DIR/.tinted.png"
-    local r; r=$(tint_icon "$2" "$(cat "$DIR/color")" "$png")
+    local r; r=$(tint_icon "$source_app" "$(cat "$DIR/color")" "$png")
     [ "$r" = ok ] || { echo "$r"; return; }
   fi
   [ -f "$png" ] || { echo none; return; }
-  set_icon "$png" "$1"
+  set_icon "$png" "$app"
 }
 
 
 # ---- Desktop: the copy, the launcher, updates ----------------------------------
 
-# Rebuild the copy when Claude.app is newer. The old copy is removed only once
-# the new one is complete. Called as "refresh_copy || log", where bash ignores
-# set -e, so every step checks itself.
+# Called as refresh_copy || log, where set -e is off, so each step checks itself.
 refresh_copy() {
   local have want
   want=$(app_version "$CLAUDE_APP")
@@ -171,12 +154,8 @@ refresh_copy() {
   rm -rf "$COPY" && mv "$COPY.new" "$COPY"
 }
 
-# A copy of Claude would update itself, and an update relaunches it without
-# --user-data-dir, on the wrong account. Claude reads a "block auto-updates"
-# policy from <data folder>-3p/, so it applies to this profile alone; the main
-# Claude keeps updating and the launcher rebuilds the copy from it.
-# That folder also holds a user's own third-party inference setup, so it is
-# only ever written when it does not exist, and only our own files are removed.
+# A self-update relaunches the copy without --user-data-dir, on the wrong account.
+# The -3p folder may hold your own provider setup, so it is written only when absent.
 block_self_update() {
   local root="$DATA-3p" id
   [ -e "$root" ] && return 0
@@ -206,7 +185,6 @@ self_update_blocked() {
   grep -qs '"disableAutoUpdates" *: *true' "$DATA-3p/configLibrary/"*.json
 }
 
-# The launcher is a one-line AppleScript app: run "claude-profiles launch <name>".
 # Apps started from the Dock get no PATH, hence the full path to this script.
 make_launcher() {
   local tmp script
@@ -220,7 +198,6 @@ make_launcher() {
   rm -rf "$tmp"
   # Its own bundle id, so macOS keeps each profile's launcher apart.
   /usr/libexec/PlistBuddy -c "Add :CFBundleIdentifier string local.claude-profiles.$NAME" "$LAUNCHER/Contents/Info.plist"
-  # The launcher shows the profile's icon, or Claude's own icon when none was chosen.
   if [ "$(apply_profile_icon "$LAUNCHER" "$CLAUDE_APP")" != ok ]; then
     sips -s format png "$(ls "$CLAUDE_APP/Contents/Resources/"*.icns | head -1)" --out "$DIR/.claude.png" >/dev/null
     set_icon "$DIR/.claude.png" "$LAUNCHER" >/dev/null
@@ -234,21 +211,19 @@ launcher_is_current() {
 
 # ---- Claude Code: settings and the terminal command ----------------------------
 
-# Give a new profile the setup from ~/.claude: linked (one copy, both profiles
-# see every change), copied (they drift apart from here), or nothing.
-seed_config() {  # seed_config shared|copy|empty
+seed_config() {
+  local mode=$1 item
   mkdir -p "$CONFIG"
-  echo "$1" > "$DIR/settings"
-  [ "$1" = empty ] && return 0
-  local item
+  echo "$mode" > "$DIR/settings"
+  [ "$mode" = empty ] && return 0
   for item in $SETUP_ITEMS; do
-    [ -e "$HOME/.claude/$item" ] || continue                   # you don't have it
-    [ -e "$CONFIG/$item" ] || [ -L "$CONFIG/$item" ] && continue   # never overwrite
+    [ -e "$HOME/.claude/$item" ] || continue
+    [ -e "$CONFIG/$item" ] || [ -L "$CONFIG/$item" ] && continue
     mkdir -p "$(dirname "$CONFIG/$item")"
-    if [ "$1" = shared ]; then ln -s "$HOME/.claude/$item" "$CONFIG/$item"; else cp -R "$HOME/.claude/$item" "$CONFIG/$item"; fi
+    if [ "$mode" = shared ]; then ln -s "$HOME/.claude/$item" "$CONFIG/$item"; else cp -R "$HOME/.claude/$item" "$CONFIG/$item"; fi
   done
-  if [ "$1" = copy ]; then
-    # Copied files still point into ~/.claude; point them at the profile's own copies.
+  if [ "$mode" = copy ]; then
+    # Copied files still point into ~/.claude.
     for item in settings.json plugins/installed_plugins.json plugins/known_marketplaces.json; do
       if [ -f "$CONFIG/$item" ]; then sed -i '' "s#$HOME/.claude/#$CONFIG/#g" "$CONFIG/$item"; fi
     done
@@ -256,8 +231,7 @@ seed_config() {  # seed_config shared|copy|empty
   copy_mcp_servers
 }
 
-# Your own MCP servers live in ~/.claude.json, next to your login. Only the
-# mcpServers entry is copied; the file itself can't be shared.
+# The rest of ~/.claude.json is your main login.
 copy_mcp_servers() {
   [ -f "$HOME/.claude.json" ] && [ ! -e "$CONFIG/.claude.json" ] || return 0
   osascript -l JavaScript - "$HOME/.claude.json" "$CONFIG/.claude.json" <<'JS' >/dev/null
@@ -275,8 +249,6 @@ JS
   return 0
 }
 
-# One block in your shell file, rewritten from the list of profiles every
-# time, so it can't drift: the claude-profiles command and claude-<name> for each.
 write_shell_block() {
   local rc name tmp
   rc=$(shell_rc)
@@ -285,8 +257,6 @@ write_shell_block() {
     rc=/dev/stderr
   elif [ -f "$rc" ]; then
     tmp="$rc.claude-profiles.tmp"
-    # Drop the old block. If its end marker is gone, stop: otherwise everything
-    # after the start marker would be dropped with it.
     awk '/^# >>> claude-profiles >>>$/{skip=1} !skip{print} /^# <<< claude-profiles <<<$/{skip=0}
          END{exit skip}' "$rc" > "$tmp" || { rm -f "$tmp"; die "$rc has '# >>> claude-profiles >>>' without its end line; fix it by hand"; }
     cat "$tmp" > "$rc"   # cat, not mv: keeps a symlinked rc file a symlink
@@ -354,7 +324,6 @@ cmd_add() {
     seed_config "$settings"
   else
     say "Keeping the existing Claude Code folder $CONFIG"
-    # Shared settings: put back any link that went missing.
     if [ "$(cat "$DIR/settings" 2>/dev/null)" = shared ]; then seed_config shared; fi
   fi
 
@@ -477,14 +446,12 @@ To delete them for good, remove both folders, and in Keychain Access delete the
 EOF
 }
 
-# Run by the Dock launcher. It has no terminal, so everything goes to the log.
 cmd_launch() {
   require_profile "$1"
   PATH=/usr/bin:/bin:/usr/sbin:/sbin
   [ -f "$DIR/launch.log" ] && tail -n 200 "$DIR/launch.log" > "$DIR/launch.log.tmp" && mv "$DIR/launch.log.tmp" "$DIR/launch.log"
   exec >> "$DIR/launch.log" 2>&1
 
-  # Never rebuild a running copy; opening it then just brings it to the front.
   if [ -z "$(running_copy)" ]; then
     refresh_copy || log "could not build the copy; opening the one there is"
     block_self_update || log "could not block self-updates"
@@ -497,15 +464,12 @@ cmd_launch() {
   open_copy
 }
 
-# Always with the profile's folders, even to bring a running window forward:
-# if Claude happens to be quitting at that moment, macOS starts it again, and
-# then it must start on the right account.
+# Full flags even to focus a running copy: if it is quitting, macOS starts it
+# again, and it must come back on the right account.
 open_copy() {
   open -a "$COPY" --env "CLAUDE_CONFIG_DIR=$CONFIG" --args --user-data-dir="$DATA"
 }
 
-# Run by claude-<name>. Says so when the account looks wrong, then hands over
-# to claude. Silent when everything is fine.
 cmd_code() {
   require_profile "$1"; shift
   command -v claude >/dev/null || die "no claude command. Install it: curl -fsSL https://claude.ai/install.sh | bash"
